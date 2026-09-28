@@ -1,0 +1,517 @@
+-- MM2 Cheat | Mobile-optimized | ESP + Noclip + Role Logic
+-- Executor: Synapse X / KRNL / Fluxus compatible
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local lp = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- ============================================================
+--  CONFIG
+-- ============================================================
+local CFG = {
+    ESP = {
+        Enabled = false,
+        ShowRoles = true,
+        MaxDist = 500,
+    },
+    Noclip = {
+        Enabled = false,
+        Speed = 60,
+    },
+    AutoAim = {   -- sheriff only: soft-lock toward murderer
+        Enabled = false,
+    },
+}
+
+-- ============================================================
+--  ROLE DETECTION
+-- ============================================================
+-- MM2 puts a Tool named "Knife" in murderer's Backpack/Character
+-- and "Gun" for sheriff. Innocent has neither.
+local function getMyRole()
+    local char = lp.Character
+    local bp   = lp.Backpack
+    if not char then return "Innocent" end
+    for _, v in ipairs({char, bp}) do
+        for _, tool in ipairs(v:GetChildren()) do
+            if tool:IsA("Tool") then
+                local n = tool.Name:lower()
+                if n:find("knife") then return "Murderer" end
+                if n:find("gun")   then return "Sheriff"  end
+            end
+        end
+    end
+    return "Innocent"
+end
+
+local function getPlayerRole(player)
+    local char = player.Character
+    local bp   = player.Backpack
+    if not char then return "Innocent" end
+    for _, v in ipairs({char, bp}) do
+        for _, tool in ipairs(v:GetChildren()) do
+            if tool:IsA("Tool") then
+                local n = tool.Name:lower()
+                if n:find("knife") then return "Murderer" end
+                if n:find("gun")   then return "Sheriff"  end
+            end
+        end
+    end
+    return "Innocent"
+end
+
+local roleColor = {
+    Murderer = Color3.fromRGB(220, 50,  50),
+    Sheriff  = Color3.fromRGB(50,  120, 220),
+    Innocent = Color3.fromRGB(50,  200, 80),
+}
+
+-- ============================================================
+--  ESP
+-- ============================================================
+local espPool = {}
+
+local function removeESP(player)
+    if espPool[player] then
+        espPool[player]:Destroy()
+        espPool[player] = nil
+    end
+end
+
+local function createESP(player)
+    if player == lp then return end
+    removeESP(player)
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name        = "MM2_ESP"
+    bb.AlwaysOnTop = true
+    bb.Size        = UDim2.new(0, 120, 0, 40)
+    bb.StudsOffset = Vector3.new(0, 3.5, 0)
+    bb.Parent      = game:GetService("CoreGui") -- stays above game UI
+
+    -- Name label
+    local nameL = Instance.new("TextLabel", bb)
+    nameL.Name            = "NameL"
+    nameL.Size            = UDim2.new(1, 0, 0.55, 0)
+    nameL.BackgroundTransparency = 1
+    nameL.TextColor3      = Color3.new(1,1,1)
+    nameL.TextStrokeTransparency = 0.4
+    nameL.Font            = Enum.Font.GothamBold
+    nameL.TextScaled      = true
+    nameL.Text            = player.Name
+
+    -- Role label
+    local roleL = Instance.new("TextLabel", bb)
+    roleL.Name            = "RoleL"
+    roleL.Size            = UDim2.new(1, 0, 0.45, 0)
+    roleL.Position        = UDim2.new(0, 0, 0.55, 0)
+    roleL.BackgroundTransparency = 1
+    roleL.TextStrokeTransparency = 0.4
+    roleL.Font            = Enum.Font.Gotham
+    roleL.TextScaled      = true
+    roleL.Text            = "..."
+
+    espPool[player] = bb
+
+    -- Update adornee + role each frame via RunService connection stored per player
+    -- (handled in main loop below for perf)
+    return bb
+end
+
+-- ============================================================
+--  NOCLIP
+-- ============================================================
+-- Sets all character parts to CanCollide = false every physics step
+local noclipConn = nil
+
+local function setNoclip(state)
+    if state and not noclipConn then
+        noclipConn = RunService.Stepped:Connect(function()
+            local char = lp.Character
+            if not char then return end
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
+            end
+        end)
+    elseif not state and noclipConn then
+        noclipConn:Disconnect()
+        noclipConn = nil
+        -- restore collision on humanoid root at least
+        local char = lp.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CanCollide = true end
+        end
+    end
+end
+
+-- ============================================================
+--  AUTO-MOVE TOWARD MURDERER (Murderer role logic)
+-- ============================================================
+-- When I'm murderer + noclip enabled: fly toward nearest innocent
+local function getNearestTarget(filterRole)
+    -- filterRole: "Innocent" | "Sheriff" | "Murderer" | nil (any)
+    local myPos = lp.Character and
+                  lp.Character:FindFirstChild("HumanoidRootPart") and
+                  lp.Character.HumanoidRootPart.Position
+    if not myPos then return nil end
+
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local role = getPlayerRole(p)
+                if not filterRole or role == filterRole then
+                    local d = (hrp.Position - myPos).Magnitude
+                    if d < bestDist then
+                        best, bestDist = p, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function flyToward(target)
+    local char = lp.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local theirHRP = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not theirHRP then return end
+
+    local dir = (theirHRP.Position - hrp.Position).Unit
+    hrp.CFrame = hrp.CFrame + dir * (CFG.Noclip.Speed * 0.05) -- ~20fps tick approx
+end
+
+-- ============================================================
+--  SOFT-AIM (Sheriff role)
+-- ============================================================
+-- Moves camera CFrame to look at murderer's HRP
+local function softAimAtMurderer()
+    local target = getNearestTarget("Murderer")
+    if not target then return end
+    local hrp = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    camera.CFrame = CFrame.lookAt(camera.CFrame.Position, hrp.Position)
+end
+
+-- ============================================================
+--  UI
+-- ============================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name              = "MM2Cheat"
+ScreenGui.ResetOnSpawn      = false
+ScreenGui.ZIndexBehavior    = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset    = true
+ScreenGui.Parent            = game:GetService("CoreGui")
+
+-- Draggable panel -----------------------------------------------
+local PANEL_W, PANEL_H = 300, 420
+local panel = Instance.new("Frame", ScreenGui)
+panel.Name              = "Panel"
+panel.Size              = UDim2.new(0, PANEL_W, 0, PANEL_H)
+panel.Position          = UDim2.new(0.5, -PANEL_W/2, 0.5, -PANEL_H/2)
+panel.BackgroundColor3  = Color3.fromRGB(10, 14, 20)
+panel.BorderSizePixel   = 0
+panel.Active            = true
+panel.Draggable         = true  -- built-in roblox drag (desktop)
+
+-- Mobile drag support
+do
+    local dragging, dragStart, startPos = false, nil, nil
+    panel.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = inp.Position
+            startPos  = panel.Position
+        end
+    end)
+    panel.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.Touch then
+            local delta = inp.Position - dragStart
+            panel.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    panel.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- Corner radius
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 8)
+
+-- Top bar
+local topBar = Instance.new("Frame", panel)
+topBar.Size             = UDim2.new(1, 0, 0, 36)
+topBar.BackgroundColor3 = Color3.fromRGB(15, 20, 30)
+topBar.BorderSizePixel  = 0
+Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 8)
+
+local title = Instance.new("TextLabel", topBar)
+title.Size              = UDim2.new(1, -10, 1, 0)
+title.Position          = UDim2.new(0, 10, 0, 0)
+title.BackgroundTransparency = 1
+title.Text              = "MM2  •  Preview"
+title.TextColor3        = Color3.fromRGB(180, 220, 255)
+title.Font              = Enum.Font.GothamBold
+title.TextSize          = 14
+title.TextXAlignment    = Enum.TextXAlignment.Left
+
+-- Role indicator (live)
+local roleIndicator = Instance.new("TextLabel", topBar)
+roleIndicator.Size              = UDim2.new(0, 90, 1, 0)
+roleIndicator.Position          = UDim2.new(1, -95, 0, 0)
+roleIndicator.BackgroundTransparency = 1
+roleIndicator.Font              = Enum.Font.GothamBold
+roleIndicator.TextSize          = 13
+roleIndicator.TextXAlignment    = Enum.TextXAlignment.Right
+roleIndicator.Text              = "Role: ?"
+
+-- Scroll content area
+local scroll = Instance.new("ScrollingFrame", panel)
+scroll.Size             = UDim2.new(1, 0, 1, -36)
+scroll.Position         = UDim2.new(0, 0, 0, 36)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel  = 0
+scroll.ScrollBarThickness = 3
+scroll.ScrollBarImageColor3 = Color3.fromRGB(60, 120, 220)
+scroll.CanvasSize       = UDim2.new(0, 0, 0, 0) -- auto below
+
+local listLayout = Instance.new("UIListLayout", scroll)
+listLayout.Padding      = UDim.new(0, 2)
+listLayout.SortOrder    = Enum.SortOrder.LayoutOrder
+
+-- ============================================================
+--  UI helpers
+-- ============================================================
+local function makeSection(labelText, order)
+    local f = Instance.new("Frame", scroll)
+    f.Size              = UDim2.new(1, -16, 0, 26)
+    f.BackgroundTransparency = 1
+    f.LayoutOrder       = order
+
+    local lbl = Instance.new("TextLabel", f)
+    lbl.Size            = UDim2.new(1, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text            = labelText
+    lbl.TextColor3      = Color3.fromRGB(80, 130, 200)
+    lbl.Font            = Enum.Font.GothamBold
+    lbl.TextSize        = 11
+    lbl.TextXAlignment  = Enum.TextXAlignment.Left
+
+    local line = Instance.new("Frame", f)
+    line.Size           = UDim2.new(1, 0, 0, 1)
+    line.Position       = UDim2.new(0, 0, 1, -1)
+    line.BackgroundColor3 = Color3.fromRGB(30, 50, 80)
+    line.BorderSizePixel = 0
+    return f
+end
+
+-- Toggle row: returns toggle button so caller can wire it
+local function makeToggle(labelText, order, configTable, configKey, onChanged)
+    local row = Instance.new("Frame", scroll)
+    row.Size            = UDim2.new(1, -16, 0, 44)
+    row.BackgroundColor3 = Color3.fromRGB(14, 18, 26)
+    row.BorderSizePixel = 0
+    row.LayoutOrder     = order
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size            = UDim2.new(1, -60, 1, 0)
+    lbl.Position        = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text            = labelText
+    lbl.TextColor3      = Color3.fromRGB(200, 210, 230)
+    lbl.Font            = Enum.Font.Gotham
+    lbl.TextSize        = 13
+    lbl.TextXAlignment  = Enum.TextXAlignment.Left
+
+    -- Toggle pill
+    local pill = Instance.new("Frame", row)
+    pill.Size           = UDim2.new(0, 42, 0, 22)
+    pill.Position       = UDim2.new(1, -54, 0.5, -11)
+    pill.BackgroundColor3 = Color3.fromRGB(30, 35, 50)
+    pill.BorderSizePixel = 0
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame", pill)
+    knob.Size           = UDim2.new(0, 18, 0, 18)
+    knob.Position       = UDim2.new(0, 2, 0.5, -9)
+    knob.BackgroundColor3 = Color3.fromRGB(120, 130, 150)
+    knob.BorderSizePixel = 0
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local function refresh()
+        local on = configTable[configKey]
+        TweenService:Create(knob, TweenInfo.new(0.15), {
+            Position = on and UDim2.new(0, 22, 0.5, -9) or UDim2.new(0, 2, 0.5, -9),
+            BackgroundColor3 = on and Color3.fromRGB(50, 130, 230) or Color3.fromRGB(120, 130, 150),
+        }):Play()
+        TweenService:Create(pill, TweenInfo.new(0.15), {
+            BackgroundColor3 = on and Color3.fromRGB(20, 50, 100) or Color3.fromRGB(30, 35, 50),
+        }):Play()
+    end
+
+    refresh()
+
+    -- Works for both Touch and MouseButton1
+    local btn = Instance.new("TextButton", row)
+    btn.Size            = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text            = ""
+    btn.ZIndex          = 5
+    btn.MouseButton1Click:Connect(function()
+        configTable[configKey] = not configTable[configKey]
+        refresh()
+        if onChanged then onChanged(configTable[configKey]) end
+    end)
+
+    return row
+end
+
+-- ============================================================
+--  BUILD UI ROWS
+-- ============================================================
+local pad = Instance.new("UIPadding", scroll)
+pad.PaddingLeft   = UDim.new(0, 8)
+pad.PaddingRight  = UDim.new(0, 8)
+pad.PaddingTop    = UDim.new(0, 8)
+pad.PaddingBottom = UDim.new(0, 8)
+
+makeSection("VISUALS", 1)
+
+makeToggle("Preview ESP", 2, CFG.ESP, "Enabled", function(v)
+    if not v then
+        for p, bb in pairs(espPool) do
+            bb.Adornee = nil
+            bb.Enabled = false
+        end
+    end
+end)
+
+makeSection("AIMBOT", 3)
+
+makeToggle("Auto Aim  (Sheriff only)", 4, CFG.AutoAim, "Enabled", nil)
+
+makeSection("MOVEMENT", 5)
+
+makeToggle("Auto Noclip  (Murderer only)", 6, CFG.Noclip, "Enabled", function(v)
+    -- Only actually enable noclip if role is murderer
+    local role = getMyRole()
+    if v and role ~= "Murderer" then
+        CFG.Noclip.Enabled = false
+        -- visual reset handled next frame
+        return
+    end
+    setNoclip(v)
+end)
+
+-- Auto-size scroll canvas
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    scroll.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 16)
+end)
+
+-- ============================================================
+--  MAIN LOOP
+-- ============================================================
+RunService.RenderStepped:Connect(function()
+    local myRole = getMyRole()
+
+    -- Role indicator
+    roleIndicator.Text       = "Role: " .. myRole
+    roleIndicator.TextColor3 = roleColor[myRole] or Color3.new(1,1,1)
+
+    -- ESP update
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == lp then continue end
+
+        local char = player.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+        if CFG.ESP.Enabled and hrp and hum and hum.Health > 0 then
+            local bb = espPool[player]
+            if not bb then bb = createESP(player) end
+            if bb then
+                bb.Adornee = hrp
+                bb.Enabled = true
+
+                local role  = getPlayerRole(player)
+                local color = roleColor[role] or Color3.new(1,1,1)
+
+                local nameL = bb:FindFirstChild("NameL")
+                local roleL = bb:FindFirstChild("RoleL")
+                if nameL then
+                    nameL.TextColor3 = color
+                end
+                if roleL then
+                    roleL.Text       = "[" .. role .. "]"
+                    roleL.TextColor3 = color
+                end
+
+                -- Distance cull
+                local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                if myHRP then
+                    local dist = (hrp.Position - myHRP.Position).Magnitude
+                    bb.Enabled = dist <= CFG.ESP.MaxDist
+                end
+            end
+        else
+            local bb = espPool[player]
+            if bb then
+                bb.Enabled = false
+            end
+        end
+    end
+
+    -- Noclip auto-fly toward nearest innocent (murderer logic)
+    if CFG.Noclip.Enabled and myRole == "Murderer" then
+        local target = getNearestTarget("Innocent") or getNearestTarget("Sheriff")
+        if target then
+            flyToward(target)
+        end
+    end
+
+    -- Soft-aim toward murderer (sheriff logic)
+    if CFG.AutoAim.Enabled and myRole == "Sheriff" then
+        softAimAtMurderer()
+    end
+
+    -- Force-disable features if role doesn't match
+    if myRole ~= "Murderer" and CFG.Noclip.Enabled then
+        CFG.Noclip.Enabled = false
+        setNoclip(false)
+    end
+    if myRole ~= "Sheriff" and CFG.AutoAim.Enabled then
+        -- don't force disable — let user keep it enabled, just won't fire above
+    end
+end)
+
+-- ============================================================
+--  CLEANUP on player leave (prevent esp leak)
+-- ============================================================
+Players.PlayerRemoving:Connect(function(p)
+    removeESP(p)
+end)
+
+-- Init ESP frames for already-present players
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= lp then
+        createESP(p)
+    end
+end
+Players.PlayerAdded:Connect(function(p)
+    createESP(p)
+end)
