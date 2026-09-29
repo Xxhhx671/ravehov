@@ -1,8 +1,8 @@
 --[[
-    TORIUM v3.8 — WORKING BUILD
+    TORIUM v3.6.2
     Password: TesterMode
-    NEW: Settings/Configs tab, ESP role colors, World customization, Telegram button
-]]
+    Config: File-based save/load by UserId + Device fallback
+--]]
 
 if getgenv().ToriumLib_Cleanup then pcall(getgenv().ToriumLib_Cleanup) end
 
@@ -23,19 +23,19 @@ local LocalPlayer      = Players.LocalPlayer
 local IS_MOBILE        = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 
 local State = {
-    GlowESP=false, NameESP=false, RoleESP=false,
+    GlowESP=false, GlowColor=Color3.fromRGB(236,72,153), BoxESP=false, NameESP=false, RoleESP=false,
+    HealthBarESP=false, DistanceESP=false, WeaponESP=false, GunDropESP=false, TrapESP=false,
+    SilentAim=false, AutoShoot=false, AutoKnifeThrow=false, InstakillShot=false, SpawnKnifeNear=false,
+    ShootOffset=3, OffsetPingMult=1, KillAura=false, LoopFlingMurderer=false,
+    AutoGrabGun=false, AntiFling=false, Noclip=false, ChaseCamera=false, ChaseTarget=nil,
+    Crosshair=false, CrosshairColor=Color3.fromRGB(168,85,247), Fullbright=false, NoFog=false,
+    CustomFogColor=false, FogColorVal=Color3.fromRGB(168,85,247), SaturationBoost=false, SaturationVal=1.5,
+    DepthOfField=false, SunRays=false, Spinbot=false, YawSpeed=30, Jitter=false, JitterIntensity=5,
+    Bhop=false, AutoStrafe=false, StrafeSpeed=16, WalkSpeed=16, RoundTimer=false,
+    NightMode=false, Brightness=2, AmbientColor=Color3.fromRGB(128,128,128),
     ESP_Murderer_Color = Color3.fromRGB(236,72,153),
     ESP_Sheriff_Color = Color3.fromRGB(59,130,246),
     ESP_Innocent_Color = Color3.fromRGB(34,197,94),
-    SilentAim=false, AutoShoot=false, AutoKnifeThrow=false, InstakillShot=false, SpawnKnifeNear=false,
-    ShootOffset=3, OffsetPingMult=1, KillAura=false, LoopFlingMurderer=false,
-    AutoGrabGun=false, AntiFling=false, Noclip=false,
-    Crosshair=false, CrosshairColor=Color3.fromRGB(168,85,247),
-    Fullbright=false, NoFog=false, NightMode=false, Brightness=2,
-    AmbientColor=Color3.fromRGB(128,128,128),
-    SaturationBoost=false, SaturationVal=1.5,
-    DepthOfField=false, SunRays=false, Spinbot=false, YawSpeed=30,
-    Bhop=false, AutoStrafe=false, StrafeSpeed=16, WalkSpeed=16, RoundTimer=false,
 }
 local activeCleanups = {}
 
@@ -44,11 +44,11 @@ getgenv().ToriumLib_Cleanup = function()
     activeCleanups = {}
     pcall(function()
         for _, obj in ipairs(CoreGui:GetChildren()) do
-            if obj.Name:find("Torium") then obj:Destroy() end
+            if obj.Name:find("Torium") or obj.Name:find("Fragment") then obj:Destroy() end
         end
         if LocalPlayer.PlayerGui then
             for _, obj in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
-                if obj.Name:find("Torium") then obj:Destroy() end
+                if obj.Name:find("Torium") or obj.Name:find("Fragment") then obj:Destroy() end
             end
         end
     end)
@@ -62,12 +62,14 @@ end
 getgenv().ToriumLib_Loaded = true
 
 pcall(function()
-    for _, name in ipairs({"Toriumv2Gui","ToriumPasswordScreen","ToriumESP","ToriumCrosshair","ToriumAKMenu"}) do
+    for _, name in ipairs({"Toriumv2Gui","ToriumPasswordScreen","FragmentGui","FragmentPwdScreen"}) do
         local g = CoreGui:FindFirstChild(name) or (LocalPlayer.PlayerGui and LocalPlayer.PlayerGui:FindFirstChild(name))
         if g then g:Destroy() end
     end
-    local b = Lighting:FindFirstChild("ToriumBlurEffect")
-    if b then b:Destroy() end
+    for _, name in ipairs({"ToriumBlurEffect","FragmentBlur"}) do
+        local b = Lighting:FindFirstChild(name)
+        if b then b:Destroy() end
+    end
 end)
 
 local ACCENT_PRIMARY = Color3.fromRGB(168, 85, 247)
@@ -79,9 +81,15 @@ local TEXT_MAIN      = Color3.fromRGB(243, 238, 255)
 local TEXT_SUB       = Color3.fromRGB(152, 138, 180)
 local SMOOTH_TWEEN   = TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 
+local ROLE_COLORS = {
+    Murderer = Color3.fromRGB(236,72,153),
+    Sheriff  = Color3.fromRGB(59,130,246),
+    Innocent = Color3.fromRGB(34,197,94),
+}
+
 local function GetRoleColor(role)
     if role == "Murderer" then return State.ESP_Murderer_Color end
-    if role == "Sheriff"  then return State.ESP_Sheriff_Color  end
+    if role == "Sheriff" then return State.ESP_Sheriff_Color end
     return State.ESP_Innocent_Color
 end
 
@@ -123,9 +131,7 @@ local function DetectDevice()
     elseif UserInputService.TouchEnabled and UserInputService.MouseEnabled then p = "Tablet"
     elseif UserInputService.GamepadEnabled then p = "Console" end
     local o = "Unknown"
-    pcall(function()
-        o = tostring(UserInputService:GetPlatform()):gsub("Enum.Platform.","")
-    end)
+    pcall(function() o = tostring(UserInputService:GetPlatform()):gsub("Enum.Platform.","") end)
     return p, o
 end
 
@@ -143,97 +149,6 @@ UIBlur.Enabled = false
 UIBlur.Parent = Lighting
 table.insert(activeCleanups, function() pcall(function() UIBlur:Destroy() end) end)
 
--- CONFIG SYSTEM (file-based with fallback to memory)
-local function GetConfigKey()
-    return "ToriumCfg_" .. tostring(LocalPlayer.UserId)
-end
-local function GetDeviceKey()
-    local p = "PC"
-    pcall(function()
-        if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then p = "Mobile" end
-    end)
-    return "ToriumDevice_" .. p
-end
-local function HasFileAPI()
-    return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-end
-
-local function SerializeState()
-    local config = {}
-    for k, v in pairs(State) do
-        if typeof(v) == "Color3" then
-            config[k] = {__t = "Color3", r = v.R, g = v.G, b = v.B}
-        elseif type(v) == "boolean" or type(v) == "number" or type(v) == "string" then
-            config[k] = v
-        end
-    end
-    return config
-end
-
-local function ApplyConfig(data)
-    for k, v in pairs(data) do
-        if type(v) == "table" and v.__t == "Color3" then
-            State[k] = Color3.new(v.r, v.g, v.b)
-        else
-            State[k] = v
-        end
-    end
-end
-
-local function SaveConfig(slot)
-    local json = HttpService:JSONEncode(SerializeState())
-    if HasFileAPI() then
-        pcall(function()
-            if not isfolder("Torium") then makefolder("Torium") end
-            writefile("Torium/" .. GetConfigKey() .. "_" .. slot .. ".json", json)
-            writefile("Torium/" .. GetDeviceKey() .. "_" .. slot .. ".json", json)
-        end)
-    else
-        getgenv().ToriumMemCfg = getgenv().ToriumMemCfg or {}
-        getgenv().ToriumMemCfg[tostring(LocalPlayer.UserId) .. "_" .. slot] = json
-    end
-    SendNotify("Config", "Saved slot " .. slot)
-end
-
-local function LoadConfig(slot)
-    local json
-    if HasFileAPI() then
-        pcall(function()
-            local accPath = "Torium/" .. GetConfigKey() .. "_" .. slot .. ".json"
-            local devPath = "Torium/" .. GetDeviceKey() .. "_" .. slot .. ".json"
-            if isfile(accPath) then json = readfile(accPath)
-            elseif isfile(devPath) then json = readfile(devPath) end
-        end)
-    else
-        getgenv().ToriumMemCfg = getgenv().ToriumMemCfg or {}
-        json = getgenv().ToriumMemCfg[tostring(LocalPlayer.UserId) .. "_" .. slot]
-    end
-    if not json then SendNotify("Config", "Slot " .. slot .. " empty") return false end
-    local ok, data = pcall(function() return HttpService:JSONDecode(json) end)
-    if not ok or not data then return false end
-    ApplyConfig(data)
-    SendNotify("Config", "Loaded slot " .. slot)
-    return true
-end
-
-local function DeleteConfig(slot)
-    if HasFileAPI() then
-        pcall(function()
-            if isfile("Torium/" .. GetConfigKey() .. "_" .. slot .. ".json") then
-                delfile("Torium/" .. GetConfigKey() .. "_" .. slot .. ".json")
-            end
-        end)
-    else
-        getgenv().ToriumMemCfg = getgenv().ToriumMemCfg or {}
-        getgenv().ToriumMemCfg[tostring(LocalPlayer.UserId) .. "_" .. slot] = nil
-    end
-    SendNotify("Config", "Deleted slot " .. slot)
-end
-
-local function SendNotify(t, x)
-    pcall(function() StarterGui:SetCore("SendNotification", {Title=t, Text=x, Duration=4}) end)
-end
-
 -- PASSWORD GATE
 local PASSWORD = "TesterMode"
 local pwdGui = Instance.new("ScreenGui")
@@ -242,6 +157,7 @@ pwdGui.ResetOnSpawn = false
 pwdGui.IgnoreGuiInset = true
 pcall(function() pwdGui.Parent = CoreGui end)
 if not pwdGui.Parent then pwdGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
 local pwdOv = Instance.new("Frame")
 pwdOv.Size = UDim2.new(1,0,1,0)
 pwdOv.BackgroundColor3 = Color3.new(0,0,0)
@@ -249,6 +165,7 @@ pwdOv.BackgroundTransparency = 0.4
 pwdOv.BorderSizePixel = 0
 pwdOv.ZIndex = 500
 pwdOv.Parent = pwdGui
+
 local pwdCard = Instance.new("Frame")
 pwdCard.AnchorPoint = Vector2.new(0.5,0.5)
 pwdCard.Size = UDim2.new(0,340,0,220)
@@ -258,10 +175,11 @@ pwdCard.BorderSizePixel = 0
 pwdCard.ZIndex = 501
 pwdCard.Parent = pwdGui
 Instance.new("UICorner", pwdCard).CornerRadius = UDim.new(0,12)
-local pst = Instance.new("UIStroke")
-pst.Color = BORDER_COLOR
-pst.Thickness = 1.5
-pst.Parent = pwdCard
+local ps = Instance.new("UIStroke")
+ps.Color = BORDER_COLOR
+ps.Thickness = 1.5
+ps.Parent = pwdCard
+
 local pwdTitle = Instance.new("TextLabel")
 pwdTitle.Size = UDim2.new(1,0,0,40)
 pwdTitle.Position = UDim2.new(0,0,0,18)
@@ -273,6 +191,18 @@ pwdTitle.Font = Enum.Font.GothamBold
 pwdTitle.TextSize = 20
 pwdTitle.ZIndex = 502
 pwdTitle.Parent = pwdCard
+
+local pwdSub = Instance.new("TextLabel")
+pwdSub.Size = UDim2.new(1,-40,0,14)
+pwdSub.Position = UDim2.new(0,20,0,62)
+pwdSub.BackgroundTransparency = 1
+pwdSub.Text = "Введи пароль для доступа"
+pwdSub.TextColor3 = TEXT_SUB
+pwdSub.Font = Enum.Font.GothamMedium
+pwdSub.TextSize = 11
+pwdSub.ZIndex = 502
+pwdSub.Parent = pwdCard
+
 local pwdInF = Instance.new("Frame")
 pwdInF.Size = UDim2.new(1,-40,0,44)
 pwdInF.Position = UDim2.new(0,20,0,88)
@@ -281,11 +211,16 @@ pwdInF.BorderSizePixel = 0
 pwdInF.ZIndex = 502
 pwdInF.Parent = pwdCard
 Instance.new("UICorner", pwdInF).CornerRadius = UDim.new(0,6)
+local pwdInFS = Instance.new("UIStroke")
+pwdInFS.Color = BORDER_COLOR
+pwdInFS.Thickness = 1
+pwdInFS.Parent = pwdInF
+
 local pwdIn = Instance.new("TextBox")
 pwdIn.Size = UDim2.new(1,-20,1,0)
 pwdIn.Position = UDim2.new(0,10,0,0)
 pwdIn.BackgroundTransparency = 1
-pwdIn.PlaceholderText = "Password..."
+pwdIn.PlaceholderText = "Пароль..."
 pwdIn.PlaceholderColor3 = Color3.fromRGB(80,70,100)
 pwdIn.Text = ""
 pwdIn.TextColor3 = TEXT_MAIN
@@ -295,6 +230,7 @@ pwdIn.TextXAlignment = Enum.TextXAlignment.Left
 pwdIn.ClearTextOnFocus = false
 pwdIn.ZIndex = 502
 pwdIn.Parent = pwdInF
+
 local pwdInfo = Instance.new("TextLabel")
 pwdInfo.Size = UDim2.new(1,-40,0,20)
 pwdInfo.Position = UDim2.new(0,20,0,140)
@@ -305,17 +241,19 @@ pwdInfo.Font = Enum.Font.GothamMedium
 pwdInfo.TextSize = 11
 pwdInfo.ZIndex = 502
 pwdInfo.Parent = pwdCard
+
 local pwdBtn = Instance.new("TextButton")
 pwdBtn.Size = UDim2.new(1,-40,0,40)
 pwdBtn.Position = UDim2.new(0,20,1,-52)
 pwdBtn.BackgroundColor3 = ACCENT_PRIMARY
-pwdBtn.Text = "LOG IN"
+pwdBtn.Text = "ВОЙТИ"
 pwdBtn.TextColor3 = Color3.new(1,1,1)
 pwdBtn.Font = Enum.Font.GothamBold
 pwdBtn.TextSize = 13
 pwdBtn.ZIndex = 502
 pwdBtn.Parent = pwdCard
 Instance.new("UICorner", pwdBtn).CornerRadius = UDim.new(0,8)
+
 local pwdAttempts = 0
 local pwdState = "wait"
 local function pwdCheck()
@@ -325,7 +263,7 @@ local function pwdCheck()
         pcall(function() pwdGui:Destroy() end)
     else
         pwdAttempts = pwdAttempts + 1
-        pwdInfo.Text = "Wrong password (" .. pwdAttempts .. "/5)"
+        pwdInfo.Text = "Неверный пароль (" .. pwdAttempts .. "/5)"
         pwdIn.Text = ""
         PlayClickSound()
         if pwdAttempts >= 5 then
@@ -342,6 +280,7 @@ if pwdState == "denied" then
     return
 end
 
+-- MAIN GUI
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "Toriumv2Gui"
 ScreenGui.ResetOnSpawn = false
@@ -378,6 +317,9 @@ local function GetMap()
         if o:FindFirstChild("CoinContainer") and o:FindFirstChild("Spawns") then return o end
     end
 end
+local function SendNotify(t, x)
+    pcall(function() StarterGui:SetCore("SendNotification", {Title=t, Text=x, Duration=4}) end)
+end
 local function GetMyChar() return LocalPlayer.Character end
 local function GetMyHRP()
     local c = GetMyChar()
@@ -398,7 +340,132 @@ local function GetPredictedPosition(target, offset)
     return p * mult
 end
 
--- WATERMARK
+-- CONFIG SYSTEM (file-based + memory fallback)
+local function HasFileAPI()
+    return type(writefile) == "function"
+       and type(readfile) == "function"
+       and type(isfile) == "function"
+       and type(isfolder) == "function"
+       and type(makefolder) == "function"
+end
+
+local function EnsureFolder()
+    if not HasFileAPI() then return false end
+    local ok = pcall(function()
+        if not isfolder("Torium") then makefolder("Torium") end
+    end)
+    return ok
+end
+
+local function GetUserKey()
+    return tostring(LocalPlayer.UserId)
+end
+
+local function GetDeviceKey()
+    local p = "PC"
+    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then p = "Mobile"
+    elseif UserInputService.TouchEnabled and UserInputService.MouseEnabled then p = "Tablet" end
+    return "Device_" .. p
+end
+
+local function BuildJSON()
+    local cfg = {}
+    for k, v in pairs(State) do
+        if typeof(v) == "Color3" then
+            cfg[k] = {r = v.R, g = v.G, b = v.B, _c = true}
+        elseif type(v) == "boolean" or type(v) == "number" or type(v) == "string" then
+            cfg[k] = v
+        end
+    end
+    return HttpService:JSONEncode(cfg)
+end
+
+local function ApplyJSON(js)
+    local ok, cfg = pcall(function() return HttpService:JSONDecode(js) end)
+    if not ok or not cfg then return false end
+    for k, v in pairs(cfg) do
+        if type(v) == "table" and v._c then
+            State[k] = Color3.new(v.r, v.g, v.b)
+        else
+            State[k] = v
+        end
+    end
+    return true
+end
+
+local function SaveConfig(slot)
+    local js = BuildJSON()
+    local saved = false
+
+    if HasFileAPI() and EnsureFolder() then
+        local ok1 = pcall(function()
+            writefile("Torium/user_" .. GetUserKey() .. "_slot" .. slot .. ".json", js)
+        end)
+        local ok2 = pcall(function()
+            writefile("Torium/" .. GetDeviceKey() .. "_slot" .. slot .. ".json", js)
+        end)
+        saved = ok1 or ok2
+    end
+
+    getgenv().ToriumConfigs = getgenv().ToriumConfigs or {}
+    getgenv().ToriumConfigs[GetUserKey() .. "_" .. slot] = js
+
+    if saved then
+        SendNotify("Config", "Saved slot " .. slot .. " (file)")
+    else
+        SendNotify("Config", "Saved slot " .. slot .. " (memory)")
+    end
+end
+
+local function LoadConfig(slot)
+    local js
+
+    if HasFileAPI() then
+        pcall(function()
+            local userPath = "Torium/user_" .. GetUserKey() .. "_slot" .. slot .. ".json"
+            local devPath = "Torium/" .. GetDeviceKey() .. "_slot" .. slot .. ".json"
+            if isfile(userPath) then
+                js = readfile(userPath)
+            elseif isfile(devPath) then
+                js = readfile(devPath)
+            end
+        end)
+    end
+
+    if not js then
+        getgenv().ToriumConfigs = getgenv().ToriumConfigs or {}
+        js = getgenv().ToriumConfigs[GetUserKey() .. "_" .. slot]
+    end
+
+    if not js then
+        SendNotify("Config", "Slot " .. slot .. " empty")
+        return
+    end
+
+    if ApplyJSON(js) then
+        SendNotify("Config", "Loaded slot " .. slot)
+    else
+        SendNotify("Config", "Load failed")
+    end
+end
+
+local function DeleteConfig(slot)
+    if HasFileAPI() then
+        pcall(function()
+            local userPath = "Torium/user_" .. GetUserKey() .. "_slot" .. slot .. ".json"
+            local devPath = "Torium/" .. GetDeviceKey() .. "_slot" .. slot .. ".json"
+            if isfile(userPath) then delfile(userPath) end
+            if isfile(devPath) then delfile(devPath) end
+        end)
+    end
+
+    getgenv().ToriumConfigs = getgenv().ToriumConfigs or {}
+    getgenv().ToriumConfigs[GetUserKey() .. "_" .. slot] = nil
+
+    SendNotify("Config", "Deleted slot " .. slot)
+end
+
+-- Watermark
 local currentFPS, currentPing = 60, 0
 local fc, lfc = 0, tick()
 RunService.RenderStepped:Connect(function()
@@ -437,28 +504,51 @@ local wmp = Instance.new("UIPadding")
 wmp.PaddingLeft = UDim.new(0,10)
 wmp.PaddingRight = UDim.new(0,8)
 wmp.Parent = Watermark
-local function MakeWmLabel(text, color, bold, order)
-    local l = Instance.new("TextLabel")
-    l.AutomaticSize = Enum.AutomaticSize.X
-    l.Size = UDim2.new(0,0,1,0)
-    l.BackgroundTransparency = 1
-    l.Text = text
-    l.TextColor3 = color
-    l.Font = bold and Enum.Font.GothamBold or Enum.Font.GothamMedium
-    l.TextSize = 10.5
-    l.LayoutOrder = order
-    l.Parent = Watermark
-    return l
-end
-local wmLogo = MakeWmLabel("TORIUM v3.8", ACCENT_PRIMARY, true, 1)
-local wmFps = MakeWmLabel("60 FPS", TEXT_MAIN, false, 2)
-local wmPing = MakeWmLabel("0 ms", TEXT_MAIN, false, 3)
-local wmTime = MakeWmLabel("00:00", TEXT_MAIN, false, 4)
+local logo = Instance.new("TextLabel")
+logo.AutomaticSize = Enum.AutomaticSize.X
+logo.Size = UDim2.new(0,0,1,0)
+logo.BackgroundTransparency = 1
+logo.Text = "TORIUM v3.6.2"
+logo.TextColor3 = ACCENT_PRIMARY
+logo.Font = Enum.Font.GothamBold
+logo.TextSize = 10.5
+logo.LayoutOrder = 1
+logo.Parent = Watermark
+local fpsL = Instance.new("TextLabel")
+fpsL.AutomaticSize = Enum.AutomaticSize.X
+fpsL.Size = UDim2.new(0,0,1,0)
+fpsL.BackgroundTransparency = 1
+fpsL.Text = "60 FPS"
+fpsL.TextColor3 = TEXT_MAIN
+fpsL.Font = Enum.Font.GothamMedium
+fpsL.TextSize = 10.5
+fpsL.LayoutOrder = 2
+fpsL.Parent = Watermark
+local pingL = Instance.new("TextLabel")
+pingL.AutomaticSize = Enum.AutomaticSize.X
+pingL.Size = UDim2.new(0,0,1,0)
+pingL.BackgroundTransparency = 1
+pingL.Text = "0 ms"
+pingL.TextColor3 = TEXT_MAIN
+pingL.Font = Enum.Font.GothamMedium
+pingL.TextSize = 10.5
+pingL.LayoutOrder = 3
+pingL.Parent = Watermark
+local timeL = Instance.new("TextLabel")
+timeL.AutomaticSize = Enum.AutomaticSize.X
+timeL.Size = UDim2.new(0,0,1,0)
+timeL.BackgroundTransparency = 1
+timeL.Text = "00:00"
+timeL.TextColor3 = TEXT_MAIN
+timeL.Font = Enum.Font.GothamMedium
+timeL.TextSize = 10.5
+timeL.LayoutOrder = 4
+timeL.Parent = Watermark
 RunService.RenderStepped:Connect(function()
     pcall(function()
-        wmFps.Text = currentFPS .. " FPS"
-        wmPing.Text = currentPing .. " ms"
-        wmTime.Text = os.date("%H:%M")
+        fpsL.Text = currentFPS .. " FPS"
+        pingL.Text = currentPing .. " ms"
+        timeL.Text = os.date("%H:%M")
     end)
 end)
 local wDrag, wSt, wSP
@@ -485,6 +575,7 @@ ESP_ScreenGui.IgnoreGuiInset = true
 pcall(function() ESP_ScreenGui.Parent = CoreGui end)
 if not ESP_ScreenGui.Parent then ESP_ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 table.insert(activeCleanups, function() pcall(function() ESP_ScreenGui:Destroy() end) end)
+
 local ESP_OBJECTS = {}
 local function CreateESPFor(plr)
     if plr == LocalPlayer or ESP_OBJECTS[plr] then return end
@@ -520,13 +611,15 @@ local function RemoveESPFor(plr)
     pcall(function() e.bb:Destroy() end)
     ESP_OBJECTS[plr] = nil
 end
+
 for _, p in ipairs(Players:GetPlayers()) do
     if p ~= LocalPlayer then CreateESPFor(p) end
 end
 Players.PlayerAdded:Connect(CreateESPFor)
 Players.PlayerRemoving:Connect(RemoveESPFor)
+
 task.spawn(function()
-    while task.wait(0.15) do
+    while task.wait(0.1) do
         pcall(function()
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer then
@@ -548,7 +641,7 @@ task.spawn(function()
                         end
                         local head = c:FindFirstChild("Head")
                         e.bb.Adornee = head or c:FindFirstChild("HumanoidRootPart")
-                        if State.NameESP or State.RoleESP then
+                        if State.NameESP then
                             e.lbl.Visible = true
                             e.lbl.Text = plr.Name .. " [" .. role .. "]"
                             e.lbl.TextColor3 = col
@@ -568,6 +661,7 @@ task.spawn(function()
     end
 end)
 
+-- Crosshair
 local CrosshairGui = Instance.new("ScreenGui")
 CrosshairGui.Name = "ToriumCrosshair"
 CrosshairGui.ResetOnSpawn = false
@@ -610,6 +704,7 @@ local BASE_W, BASE_H = 660, 440
 local SCALE = 1.15
 local ss = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280,720)
 if IS_MOBILE then SCALE = math.min(math.min(BASE_W*1.15, ss.X-40)/BASE_W, math.min(BASE_H*1.15, ss.Y-80)/BASE_H) end
+
 local MainFrame = Instance.new("Frame")
 MainFrame.AnchorPoint = Vector2.new(0.5,0.5)
 MainFrame.Size = UDim2.new(0,BASE_W,0,BASE_H)
@@ -687,7 +782,7 @@ Title.Size = UDim2.new(0,220,1,0)
 Title.Position = UDim2.new(0,16,0,0)
 Title.BackgroundTransparency = 1
 Title.RichText = true
-Title.Text = '<font color="#d9afff">TORIUM</font> <font color="#7a6890">| v3.8</font>'
+Title.Text = '<font color="#d9afff">TORIUM</font> <font color="#7a6890">| v3.6.2</font>'
 Title.TextColor3 = TEXT_MAIN
 Title.TextSize = 13
 Title.Font = Enum.Font.GothamBold
@@ -695,47 +790,27 @@ Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.ZIndex = 6
 Title.Parent = TopNotch
 
--- NEWS BUTTON
-local NewsIcon = Instance.new("TextButton")
-NewsIcon.Size = UDim2.new(0, 28, 0, 28)
-NewsIcon.Position = UDim2.new(1, -106, 0.5, -14)
-NewsIcon.BackgroundTransparency = 1
-NewsIcon.Text = "N"
-NewsIcon.TextColor3 = ACCENT_PRIMARY
-NewsIcon.Font = Enum.Font.GothamBold
-NewsIcon.TextSize = 15
-NewsIcon.ZIndex = 10
-NewsIcon.Parent = TopNotch
-local NewsBadge = Instance.new("Frame")
-NewsBadge.Size = UDim2.new(0, 10, 0, 10)
-NewsBadge.Position = UDim2.new(1, -10, 0, 0)
-NewsBadge.BackgroundColor3 = Color3.fromRGB(236, 72, 153)
-NewsBadge.BorderSizePixel = 0
-NewsBadge.ZIndex = 12
-NewsBadge.Parent = NewsIcon
-Instance.new("UICorner", NewsBadge).CornerRadius = UDim.new(1, 0)
-
 -- TELEGRAM BUTTON
-local TgIcon = Instance.new("TextButton")
-TgIcon.Size = UDim2.new(0, 28, 0, 28)
-TgIcon.Position = UDim2.new(1, -72, 0.5, -14)
-TgIcon.BackgroundTransparency = 1
-TgIcon.Text = "TG"
-TgIcon.TextColor3 = Color3.fromRGB(0, 170, 255)
-TgIcon.Font = Enum.Font.GothamBold
-TgIcon.TextSize = 13
-TgIcon.ZIndex = 10
-TgIcon.Parent = TopNotch
-TgIcon.MouseButton1Click:Connect(function()
+local TgBtn = Instance.new("TextButton")
+TgBtn.Size = UDim2.new(0,28,0,28)
+TgBtn.Position = UDim2.new(1,-72,0.5,-14)
+TgBtn.BackgroundTransparency = 1
+TgBtn.Text = "TG"
+TgBtn.TextColor3 = Color3.fromRGB(0,170,255)
+TgBtn.Font = Enum.Font.GothamBold
+TgBtn.TextSize = 13
+TgBtn.ZIndex = 10
+TgBtn.Parent = TopNotch
+TgBtn.MouseButton1Click:Connect(function()
     PlayClickSound()
     local url = "https://t.me/T3PP0PUCT_V_SUDE"
-    if setclipboard then pcall(function() setclipboard(url) end) end
-    SendNotify("Telegram", "Link copied: t.me/T3PP0PUCT_V_SUDE")
+    pcall(function() if setclipboard then setclipboard(url) end end)
+    SendNotify("Telegram", "Copied: t.me/T3PP0PUCT_V_SUDE")
 end)
 
 local ExitBtn = Instance.new("TextButton")
-ExitBtn.Size = UDim2.new(0, 28, 0, 28)
-ExitBtn.Position = UDim2.new(1, -38, 0.5, -14)
+ExitBtn.Size = UDim2.new(0,28,0,28)
+ExitBtn.Position = UDim2.new(1,-38,0.5,-14)
 ExitBtn.BackgroundTransparency = 1
 ExitBtn.Text = "X"
 ExitBtn.TextColor3 = Color3.fromRGB(236,72,153)
@@ -748,180 +823,6 @@ ExitBtn.MouseButton1Click:Connect(function()
     if getgenv().ToriumLib_Cleanup then getgenv().ToriumLib_Cleanup() end
 end)
 
--- NEWS PANEL
-local NewsPanel = Instance.new("Frame")
-NewsPanel.Size = UDim2.new(0, 380, 0, 0)
-NewsPanel.Position = UDim2.new(0.5, -190, 0, 60)
-NewsPanel.BackgroundColor3 = BG_DARK
-NewsPanel.BackgroundTransparency = 0.05
-NewsPanel.BorderSizePixel = 0
-NewsPanel.ClipsDescendants = true
-NewsPanel.Visible = false
-NewsPanel.ZIndex = 200
-NewsPanel.Parent = ScreenGui
-Instance.new("UICorner", NewsPanel).CornerRadius = UDim.new(0, 10)
-local NewsStroke = Instance.new("UIStroke")
-NewsStroke.Color = BORDER_COLOR
-NewsStroke.Thickness = 1.5
-NewsStroke.Parent = NewsPanel
-local NewsHeader = Instance.new("Frame")
-NewsHeader.Size = UDim2.new(1, 0, 0, 40)
-NewsHeader.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
-NewsHeader.BackgroundTransparency = 0.05
-NewsHeader.BorderSizePixel = 0
-NewsHeader.ZIndex = 201
-NewsHeader.Parent = NewsPanel
-Instance.new("UICorner", NewsHeader).CornerRadius = UDim.new(0, 10)
-local NewsTitle = Instance.new("TextLabel")
-NewsTitle.Size = UDim2.new(1, -80, 1, 0)
-NewsTitle.Position = UDim2.new(0, 16, 0, 0)
-NewsTitle.BackgroundTransparency = 1
-NewsTitle.RichText = true
-NewsTitle.Text = '<font color="#d9afff">NEWS</font> <font color="#7a6890">| Updates</font>'
-NewsTitle.TextColor3 = TEXT_MAIN
-NewsTitle.Font = Enum.Font.GothamBold
-NewsTitle.TextSize = 13
-NewsTitle.TextXAlignment = Enum.TextXAlignment.Left
-NewsTitle.ZIndex = 203
-NewsTitle.Parent = NewsHeader
-local NewsCloseBtn = Instance.new("TextButton")
-NewsCloseBtn.Size = UDim2.new(0, 26, 0, 26)
-NewsCloseBtn.Position = UDim2.new(1, -34, 0.5, -13)
-NewsCloseBtn.BackgroundTransparency = 1
-NewsCloseBtn.Text = "X"
-NewsCloseBtn.TextColor3 = Color3.fromRGB(236, 72, 153)
-NewsCloseBtn.Font = Enum.Font.GothamBold
-NewsCloseBtn.TextSize = 14
-NewsCloseBtn.ZIndex = 203
-NewsCloseBtn.Parent = NewsHeader
-local NewsScroll = Instance.new("ScrollingFrame")
-NewsScroll.Size = UDim2.new(1, -16, 1, -56)
-NewsScroll.Position = UDim2.new(0, 8, 0, 48)
-NewsScroll.BackgroundTransparency = 1
-NewsScroll.BorderSizePixel = 0
-NewsScroll.ScrollBarThickness = 3
-NewsScroll.ScrollBarImageColor3 = ACCENT_PRIMARY
-NewsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-NewsScroll.ZIndex = 201
-NewsScroll.Parent = NewsPanel
-local NewsLayout = Instance.new("UIListLayout")
-NewsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-NewsLayout.Padding = UDim.new(0, 8)
-NewsLayout.Parent = NewsScroll
-NewsLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    NewsScroll.CanvasSize = UDim2.new(0, 0, 0, NewsLayout.AbsoluteContentSize.Y + 10)
-end)
-
-local Changelog = {
-    {v="v3.8",title="Settings + Configs + ESP Colors + Telegram",desc="Config save/load by UserId, night mode, world customization, ESP role colors, Telegram button.",date="Now",color=ACCENT_PRIMARY},
-    {v="v3.7",title="NEWS panel + Profile",desc="News panel in topbar with full changelog. Profile with bypass status.",date="Earlier",color=Color3.fromRGB(168, 85, 247)},
-    {v="v3.6",title="Purple theme",desc="Purple palette restored. Profile menu with game/executor/device info.",date="Earlier",color=Color3.fromRGB(99, 102, 241)},
-    {v="v3.5",title="Anchor fix",desc="Fixed players getting stuck. Profile with status badge.",date="Earlier",color=Color3.fromRGB(59, 130, 246)},
-    {v="v3.4",title="Shoot Button",desc="Floating SHOOT/STAB button.",date="Earlier",color=Color3.fromRGB(34, 197, 94)},
-    {v="v3.0",title="YARHM port",desc="Silent Aim, Auto Shoot, Kill Aura, Anti-Fling and more.",date="Earlier",color=Color3.fromRGB(234, 179, 8)},
-    {v="v1.0",title="First Torium",desc="Base ESP, Kill Aura, Silent Aim.",date="Start",color=Color3.fromRGB(152, 138, 180)},
-}
-
-for i, entry in ipairs(Changelog) do
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, 0, 0, 60)
-    row.BackgroundColor3 = Color3.fromRGB(22, 16, 34)
-    row.BackgroundTransparency = 0.4
-    row.BorderSizePixel = 0
-    row.LayoutOrder = i
-    row.ZIndex = 202
-    row.Parent = NewsScroll
-    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
-    local accent = Instance.new("Frame")
-    accent.Size = UDim2.new(0, 3, 1, -12)
-    accent.Position = UDim2.new(0, 4, 0, 6)
-    accent.BackgroundColor3 = entry.color
-    accent.BorderSizePixel = 0
-    accent.ZIndex = 203
-    accent.Parent = row
-    Instance.new("UICorner", accent).CornerRadius = UDim.new(1, 0)
-    local vLabel = Instance.new("TextLabel")
-    vLabel.Size = UDim2.new(0, 60, 0, 16)
-    vLabel.Position = UDim2.new(0, 14, 0, 6)
-    vLabel.BackgroundTransparency = 1
-    vLabel.Text = entry.v
-    vLabel.TextColor3 = entry.color
-    vLabel.Font = Enum.Font.GothamBold
-    vLabel.TextSize = 11
-    vLabel.TextXAlignment = Enum.TextXAlignment.Left
-    vLabel.ZIndex = 203
-    vLabel.Parent = row
-    local tLabel = Instance.new("TextLabel")
-    tLabel.Size = UDim2.new(1, -140, 0, 16)
-    tLabel.Position = UDim2.new(0, 74, 0, 6)
-    tLabel.BackgroundTransparency = 1
-    tLabel.Text = entry.title
-    tLabel.TextColor3 = TEXT_MAIN
-    tLabel.Font = Enum.Font.GothamMedium
-    tLabel.TextSize = 10.5
-    tLabel.TextXAlignment = Enum.TextXAlignment.Left
-    tLabel.ZIndex = 203
-    tLabel.Parent = row
-    local dateLabel = Instance.new("TextLabel")
-    dateLabel.Size = UDim2.new(0, 60, 0, 12)
-    dateLabel.Position = UDim2.new(1, -68, 0, 6)
-    dateLabel.BackgroundTransparency = 1
-    dateLabel.Text = entry.date
-    dateLabel.TextColor3 = TEXT_SUB
-    dateLabel.Font = Enum.Font.GothamMedium
-    dateLabel.TextSize = 9
-    dateLabel.TextXAlignment = Enum.TextXAlignment.Right
-    dateLabel.ZIndex = 203
-    dateLabel.Parent = row
-    local descLabel = Instance.new("TextLabel")
-    descLabel.Size = UDim2.new(1, -20, 0, 30)
-    descLabel.Position = UDim2.new(0, 14, 0, 24)
-    descLabel.BackgroundTransparency = 1
-    descLabel.Text = entry.desc
-    descLabel.TextColor3 = TEXT_SUB
-    descLabel.Font = Enum.Font.GothamMedium
-    descLabel.TextSize = 9.5
-    descLabel.TextWrapped = true
-    descLabel.TextXAlignment = Enum.TextXAlignment.Left
-    descLabel.TextYAlignment = Enum.TextYAlignment.Top
-    descLabel.ZIndex = 203
-    descLabel.Parent = row
-end
-
-local newsOpen = false
-NewsIcon.MouseButton1Click:Connect(function()
-    PlayClickSound()
-    newsOpen = not newsOpen
-    if newsOpen then
-        NewsPanel.Visible = true
-        NewsPanel.Size = UDim2.new(0, 380, 0, 0)
-        TweenService:Create(NewsPanel, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = UDim2.new(0, 380, 0, 420)
-        }):Play()
-        NewsBadge.Visible = false
-    else
-        local tw = TweenService:Create(NewsPanel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 380, 0, 0)
-        })
-        tw:Play()
-        tw.Completed:Connect(function()
-            if not newsOpen then NewsPanel.Visible = false end
-        end)
-    end
-end)
-NewsCloseBtn.MouseButton1Click:Connect(function()
-    PlayClickSound()
-    newsOpen = false
-    local tw = TweenService:Create(NewsPanel, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-        Size = UDim2.new(0, 380, 0, 0)
-    })
-    tw:Play()
-    tw.Completed:Connect(function()
-        if not newsOpen then NewsPanel.Visible = false end
-    end)
-end)
-
--- SIDEBAR
 local SIDEBAR_W = IS_MOBILE and 130 or 165
 local Sidebar = Instance.new("ScrollingFrame")
 Sidebar.Size = UDim2.new(0,SIDEBAR_W,1,-96)
@@ -978,7 +879,7 @@ local Rl = Instance.new("TextLabel")
 Rl.Size = UDim2.new(0,SIDEBAR_W-55,0,14)
 Rl.Position = UDim2.new(0,48,0,26)
 Rl.BackgroundTransparency = 1
-Rl.Text = "v3.8 Tester"
+Rl.Text = "v3.6.2 Tester"
 Rl.TextColor3 = ACCENT_PRIMARY
 Rl.Font = Enum.Font.GothamMedium
 Rl.TextSize = 9
@@ -1040,7 +941,6 @@ ppsu.TextSize = 10
 ppsu.TextXAlignment = Enum.TextXAlignment.Left
 ppsu.ZIndex = 152
 ppsu.Parent = PPC
-
 local StatusBadge = Instance.new("Frame")
 StatusBadge.Size = UDim2.new(1,-32,0,34)
 StatusBadge.Position = UDim2.new(0,16,0,78)
@@ -1061,7 +961,7 @@ SIcon.BackgroundTransparency = 1
 SIcon.Text = "OK"
 SIcon.TextColor3 = Color3.fromRGB(34,197,94)
 SIcon.Font = Enum.Font.GothamBold
-SIcon.TextSize = 12
+SIcon.TextSize = 14
 SIcon.ZIndex = 153
 SIcon.Parent = StatusBadge
 local SText = Instance.new("TextLabel")
@@ -1086,7 +986,6 @@ SSub.TextSize = 9
 SSub.TextXAlignment = Enum.TextXAlignment.Left
 SSub.ZIndex = 153
 SSub.Parent = StatusBadge
-
 local infoHolder = Instance.new("Frame")
 infoHolder.Size = UDim2.new(1,-32,0,0)
 infoHolder.Position = UDim2.new(0,16,0,122)
@@ -1129,14 +1028,12 @@ local function MakeRow(label, value, order, color)
     v.Parent = r
     return v
 end
-
 local gn, gs, pid = DetectGame()
 local ex = DetectExecutor()
 local plat, os = DetectDevice()
 local pp = LocalPlayer.AccountAge
 local yr = math.floor(pp / 365)
 local dy = pp % 365
-
 local rowGame = MakeRow("Game", gn, 1, ACCENT_PRIMARY)
 local rowPID  = MakeRow("PlaceId", tostring(pid), 2)
 local rowEx   = MakeRow("Executor", ex, 3, Color3.fromRGB(234,179,8))
@@ -1152,25 +1049,19 @@ local function UpdateStatusBadge()
         SStroke.Color = Color3.fromRGB(34,197,94)
         SIcon.TextColor3 = Color3.fromRGB(34,197,94)
         SText.TextColor3 = Color3.fromRGB(34,197,94)
-        SIcon.Text = "OK"
-        SText.Text = "SAFE"
-        SSub.Text = "Bypass: undetected"
+        SIcon.Text = "OK" SText.Text = "SAFE" SSub.Text = "Bypass: undetected"
     elseif status == "unsafe" then
         StatusBadge.BackgroundColor3 = Color3.fromRGB(236,72,153)
         SStroke.Color = Color3.fromRGB(236,72,153)
         SIcon.TextColor3 = Color3.fromRGB(236,72,153)
         SText.TextColor3 = Color3.fromRGB(236,72,153)
-        SIcon.Text = "!"
-        SText.Text = "UNSAFE"
-        SSub.Text = "Bypass: risky"
+        SIcon.Text = "!" SText.Text = "UNSAFE" SSub.Text = "Bypass: risky"
     else
         StatusBadge.BackgroundColor3 = Color3.fromRGB(234,179,8)
         SStroke.Color = Color3.fromRGB(234,179,8)
         SIcon.TextColor3 = Color3.fromRGB(234,179,8)
         SText.TextColor3 = Color3.fromRGB(234,179,8)
-        SIcon.Text = "*"
-        SText.Text = "NORMAL"
-        SSub.Text = "Bypass: unknown"
+        SIcon.Text = "*" SText.Text = "NORMAL" SSub.Text = "Bypass: unknown"
     end
 end
 UpdateStatusBadge()
@@ -1181,12 +1072,9 @@ ProfileBtn.MouseButton1Click:Connect(function()
     profileOpen = not profileOpen
     if profileOpen then
         local a, b, c = DetectGame()
-        rowGame.Text = a
-        rowPID.Text = tostring(c)
-        rowEx.Text = DetectExecutor()
+        rowGame.Text = a rowPID.Text = tostring(c) rowEx.Text = DetectExecutor()
         local d, e = DetectDevice()
-        rowPlat.Text = d .. " / " .. e
-        rowPing.Text = currentPing .. " ms"
+        rowPlat.Text = d .. " / " .. e rowPing.Text = currentPing .. " ms"
         UpdateStatusBadge()
     end
     local th = profileOpen and 340 or 0
@@ -1411,26 +1299,6 @@ local function BuildTabObj(pd)
         table.insert(AllUIElements, {Text=text, Frame=f, PageObj=self})
         return b
     end
-    function o:AddText(text)
-        local t = self:Next()
-        local f = Instance.new("Frame")
-        f.Size = UDim2.new(1,-6,0,26)
-        f.BackgroundColor3 = PANEL_BG
-        f.BackgroundTransparency = 0.4
-        f.BorderSizePixel = 0
-        f.Parent = t
-        Instance.new("UICorner", f).CornerRadius = UDim.new(0,6)
-        local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1,-16,1,0)
-        l.Position = UDim2.new(0,8,0,0)
-        l.BackgroundTransparency = 1
-        l.Text = text
-        l.TextColor3 = TEXT_SUB
-        l.Font = Enum.Font.GothamMedium
-        l.TextSize = 10
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Parent = f
-    end
     return o
 end
 
@@ -1542,30 +1410,23 @@ local function AddSubTab(pt, name)
     return po
 end
 
--- ADD TABS
 local tabMain = AddMainTab("Main")
 local pGeneral = AddSubTab(tabMain, "General")
 local pMurder = AddSubTab(tabMain, "Murder")
 local pSheriff = AddSubTab(tabMain, "Sheriff")
-
 local tabVisuals = AddMainTab("Visuals")
 local pEnemy = AddSubTab(tabVisuals, "Enemy")
-local pEspColors = AddSubTab(tabVisuals, "ESP Colors")
 local pExtra = AddSubTab(tabVisuals, "Extra")
 local pWorld = AddSubTab(tabVisuals, "World")
-
 local tabMovement = AddMainTab("Movement")
 local pGeneralMovement = AddSubTab(tabMovement, "General")
 local pTeleports = AddSubTab(tabMovement, "Teleports")
 local pAntiAim = AddSubTab(tabMovement, "Anti-aim")
-
 local tabMisc = AddMainTab("Misc")
 local pTroll = AddSubTab(tabMisc, "Troll")
 local pServer = AddSubTab(tabMisc, "Server")
-
 local tabSettings = AddMainTab("Settings")
 local pConfigs = AddSubTab(tabSettings, "Configs")
-local pServerSettings = AddSubTab(tabSettings, "Server")
 
 tabMain.Expanded = true
 tabMain.SubContainer.Size = UDim2.new(1,0,0,#tabMain.SubTabs*28)
@@ -1651,10 +1512,10 @@ local function StartAutoShoot()
         if not th then return end
         local o = mc.HumanoidRootPart.Position
         local d = (th.Position - o).Unit * 300
-        local rp = RaycastParams.new()
-        rp.FilterType = Enum.RaycastFilterType.Exclude
-        rp.FilterDescendantsInstances = {mc}
-        local r = workspace:Raycast(o, d, rp)
+        local pp = RaycastParams.new()
+        pp.FilterType = Enum.RaycastFilterType.Exclude
+        pp.FilterDescendantsInstances = {mc}
+        local r = workspace:Raycast(o, d, pp)
         if not r or r.Instance:IsDescendantOf(t.Character) then
             local g = mc:FindFirstChild("Gun")
             if not g and LocalPlayer.Backpack then
@@ -1850,16 +1711,16 @@ task.spawn(function()
 end)
 
 -- MURDER ALL KILL MENU
-local AKMenuGui, AKMenuOpen, AKSpinConn
-local function CreateAKMenu()
-    if AKMenuGui and AKMenuGui.Parent then return end
-    AKMenuGui = Instance.new("ScreenGui")
-    AKMenuGui.Name = "ToriumAKMenu"
-    AKMenuGui.ResetOnSpawn = false
-    AKMenuGui.IgnoreGuiInset = true
-    pcall(function() AKMenuGui.Parent = CoreGui end)
-    if not AKMenuGui.Parent then AKMenuGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-    AKMenuGui.Enabled = false
+local FragMenuGui, FragMenuOpen, FragSpinConn
+local function CreateFragMenu()
+    if FragMenuGui and FragMenuGui.Parent then return end
+    FragMenuGui = Instance.new("ScreenGui")
+    FragMenuGui.Name = "ToriumAllKillMenu"
+    FragMenuGui.ResetOnSpawn = false
+    FragMenuGui.IgnoreGuiInset = true
+    pcall(function() FragMenuGui.Parent = CoreGui end)
+    if not FragMenuGui.Parent then FragMenuGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    FragMenuGui.Enabled = false
     local ov = Instance.new("Frame")
     ov.Name = "Overlay"
     ov.Size = UDim2.new(1,0,1,0)
@@ -1867,7 +1728,7 @@ local function CreateAKMenu()
     ov.BackgroundTransparency = 1
     ov.BorderSizePixel = 0
     ov.ZIndex = 400
-    ov.Parent = AKMenuGui
+    ov.Parent = FragMenuGui
     local ctr = Instance.new("Frame")
     ctr.Name = "Center"
     ctr.AnchorPoint = Vector2.new(0.5,0.5)
@@ -1875,7 +1736,7 @@ local function CreateAKMenu()
     ctr.Size = UDim2.new(0,240,0,240)
     ctr.BackgroundTransparency = 1
     ctr.ZIndex = 402
-    ctr.Parent = AKMenuGui
+    ctr.Parent = FragMenuGui
     local outerRing = Instance.new("Frame")
     outerRing.Name = "OuterRing"
     outerRing.AnchorPoint = Vector2.new(0.5,0.5)
@@ -1917,20 +1778,29 @@ local function CreateAKMenu()
     ics.Color = ACCENT_PRIMARY
     ics.Thickness = 2
     ics.Parent = innerC
+    local ic = Instance.new("ImageLabel")
+    ic.AnchorPoint = Vector2.new(0.5,0.5)
+    ic.Position = UDim2.new(0.5,0,0.5,-8)
+    ic.Size = UDim2.new(0,50,0,50)
+    ic.BackgroundTransparency = 1
+    ic.Image = "rbxassetid://6031081418"
+    ic.ImageColor3 = ACCENT_PRIMARY
+    ic.ZIndex = 405
+    ic.Parent = ctr
     local nm = Instance.new("TextLabel")
     nm.AnchorPoint = Vector2.new(0.5,0.5)
-    nm.Position = UDim2.new(0.5,0,0.5,-10)
+    nm.Position = UDim2.new(0.5,0,0.5,35)
     nm.Size = UDim2.new(1,-40,0,20)
     nm.BackgroundTransparency = 1
     nm.Text = "TORIUM"
     nm.TextColor3 = ACCENT_PRIMARY
     nm.Font = Enum.Font.GothamBold
-    nm.TextSize = 16
+    nm.TextSize = 14
     nm.ZIndex = 405
     nm.Parent = ctr
     local sub = Instance.new("TextLabel")
     sub.AnchorPoint = Vector2.new(0.5,0.5)
-    sub.Position = UDim2.new(0.5,0,0.5,10)
+    sub.Position = UDim2.new(0.5,0,0.5,55)
     sub.Size = UDim2.new(1,-40,0,14)
     sub.BackgroundTransparency = 1
     sub.Text = "Murder All Kill"
@@ -1963,8 +1833,12 @@ local function CreateAKMenu()
     cancelBtn.Font = Enum.Font.GothamBold
     cancelBtn.TextSize = 16
     cancelBtn.ZIndex = 406
-    cancelBtn.Parent = AKMenuGui
+    cancelBtn.Parent = FragMenuGui
     Instance.new("UICorner", cancelBtn).CornerRadius = UDim.new(0,8)
+    local cbs = Instance.new("UIStroke")
+    cbs.Color = ACCENT_PRIMARY
+    cbs.Thickness = 1.5
+    cbs.Parent = cancelBtn
     local execBtn = Instance.new("TextButton")
     execBtn.Name = "Execute"
     execBtn.AnchorPoint = Vector2.new(0.5,1)
@@ -1976,11 +1850,16 @@ local function CreateAKMenu()
     execBtn.Font = Enum.Font.GothamBold
     execBtn.TextSize = 15
     execBtn.ZIndex = 406
-    execBtn.Parent = AKMenuGui
+    execBtn.Parent = FragMenuGui
     Instance.new("UICorner", execBtn).CornerRadius = UDim.new(0,10)
+    local ebs = Instance.new("UIStroke")
+    ebs.Color = Color3.new(1,1,1)
+    ebs.Thickness = 1
+    ebs.Transparency = 0.5
+    ebs.Parent = execBtn
     local fragRot = 0
-    AKSpinConn = RunService.RenderStepped:Connect(function(dt)
-        if not AKMenuOpen then return end
+    FragSpinConn = RunService.RenderStepped:Connect(function(dt)
+        if not FragMenuOpen then return end
         fragRot = fragRot + dt * 90
         if fragRot >= 360 then fragRot = fragRot - 360 end
         pcall(function()
@@ -1989,7 +1868,7 @@ local function CreateAKMenu()
         end)
     end)
     local function closeMenu()
-        AKMenuOpen = false
+        FragMenuOpen = false
         TweenService:Create(ctr, TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
             Size = UDim2.new(0,0,0,0), Rotation = 360
         }):Play()
@@ -1997,7 +1876,7 @@ local function CreateAKMenu()
         TweenService:Create(execBtn, TweenInfo.new(0.3), {BackgroundTransparency = 1, TextTransparency = 1}):Play()
         TweenService:Create(cancelBtn, TweenInfo.new(0.3), {BackgroundTransparency = 1, TextTransparency = 1}):Play()
         task.delay(0.55, function()
-            if AKMenuGui then AKMenuGui.Enabled = false end
+            if FragMenuGui then FragMenuGui.Enabled = false end
             ctr.Size = UDim2.new(0,240,0,240)
             ctr.Rotation = 0
             execBtn.BackgroundTransparency = 0
@@ -2019,35 +1898,32 @@ local function CreateAKMenu()
             closeMenu()
         end)
     end)
-    cancelBtn.MouseButton1Click:Connect(function()
-        PlayClickSound()
-        closeMenu()
-    end)
+    cancelBtn.MouseButton1Click:Connect(function() PlayClickSound() closeMenu() end)
 end
 
-local function OpenAKMenu()
-    if not AKMenuGui then CreateAKMenu() end
-    if not AKMenuGui then return end
-    local ctr = AKMenuGui:FindFirstChild("Center")
-    local ov = AKMenuGui:FindFirstChild("Overlay")
-    local eb = AKMenuGui:FindFirstChild("Execute")
-    local cb = AKMenuGui:FindFirstChild("Cancel")
-    if AKMenuOpen then
-        AKMenuOpen = false
+local function OpenFragMenu()
+    if not FragMenuGui then CreateFragMenu() end
+    if not FragMenuGui then return end
+    local ctr = FragMenuGui:FindFirstChild("Center")
+    local ov = FragMenuGui:FindFirstChild("Overlay")
+    local eb = FragMenuGui:FindFirstChild("Execute")
+    local cb = FragMenuGui:FindFirstChild("Cancel")
+    if FragMenuOpen then
+        FragMenuOpen = false
         if ctr then TweenService:Create(ctr, TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(0,0,0,0), Rotation = -360}):Play() end
         if ov then TweenService:Create(ov, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play() end
         if eb then TweenService:Create(eb, TweenInfo.new(0.3), {BackgroundTransparency = 1, TextTransparency = 1}):Play() end
         if cb then TweenService:Create(cb, TweenInfo.new(0.3), {BackgroundTransparency = 1, TextTransparency = 1}):Play() end
         task.delay(0.55, function()
-            if AKMenuGui then AKMenuGui.Enabled = false end
+            if FragMenuGui then FragMenuGui.Enabled = false end
             if ctr then ctr.Size = UDim2.new(0,240,0,240) ctr.Rotation = 0 end
             if eb then eb.BackgroundTransparency = 0 eb.TextTransparency = 0 end
             if cb then cb.BackgroundTransparency = 0.2 cb.TextTransparency = 0 end
         end)
         return
     end
-    AKMenuOpen = true
-    AKMenuGui.Enabled = true
+    FragMenuOpen = true
+    FragMenuGui.Enabled = true
     local st = ctr and ctr:FindFirstChild("Status")
     if st then st.Text = "" end
     if ctr then
@@ -2056,7 +1932,7 @@ local function OpenAKMenu()
         TweenService:Create(ctr, TweenInfo.new(0.7, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
             Size = UDim2.new(0,240,0,240), Rotation = 360
         }):Play()
-        task.delay(0.7, function() if ctr and AKMenuOpen then ctr.Rotation = 0 end end)
+        task.delay(0.7, function() if ctr and FragMenuOpen then ctr.Rotation = 0 end end)
     end
     if ov then
         ov.BackgroundTransparency = 1
@@ -2073,13 +1949,10 @@ local function OpenAKMenu()
         TweenService:Create(cb, TweenInfo.new(0.4), {BackgroundTransparency = 0.2, TextTransparency = 0}):Play()
     end
 end
-
-table.insert(activeCleanups, function()
-    pcall(function()
-        if AKSpinConn then AKSpinConn:Disconnect() end
-        if AKMenuGui then AKMenuGui:Destroy() end
-    end)
-end)
+table.insert(activeCleanups, function() pcall(function()
+    if FragSpinConn then FragSpinConn:Disconnect() end
+    if FragMenuGui then FragMenuGui:Destroy() end
+end) end)
 
 -- FEATURES
 pGeneral:AddToggle("Silent Aim", false, function(v) State.SilentAim = v end)
@@ -2110,8 +1983,17 @@ pGeneral:AddButton("Copy Sheriff Name", function()
     local s = GetSheriff()
     if s and setclipboard then pcall(function() setclipboard(s.Name) end) SendNotify("TORIUM", "Copied: " .. s.Name) end
 end)
+pGeneral:AddButton("FPS Booster", function()
+    Lighting.GlobalShadows = false
+    Lighting.FogEnd = 9e9
+    for _, o in ipairs(workspace:GetDescendants()) do
+        if o:IsA("BasePart") then o.Material = Enum.Material.Plastic o.Reflectance = 0
+        elseif o:IsA("ParticleEmitter") or o:IsA("Trail") then o.Enabled = false end
+    end
+    SendNotify("TORIUM","Graphics lowered!")
+end)
 
-pMurder:AddButton("[ Murder All Kill MENU ]", function() OpenAKMenu() end)
+pMurder:AddButton("[ Murder All Kill MENU ]", function() OpenFragMenu() end)
 pMurder:AddButton("Shoot Murderer (as Sheriff)", function() ShootMurderer() end)
 pMurder:AddToggle("Instakill Shot", false, function(v) State.InstakillShot = v end)
 pMurder:AddButton("Knife Throw to Closest", function() KnifeThrow(false) end)
@@ -2175,60 +2057,46 @@ pSheriff:AddToggle("Auto Grab Dropped Gun", false, function(v) State.AutoGrabGun
 pSheriff:AddSlider("Shoot Offset", 0, 10, 3, function(v) State.ShootOffset = v end)
 pSheriff:AddSlider("Ping Multiplier", 0, 5, 1, function(v) State.OffsetPingMult = v end)
 
--- VISUALS - Enemy
+-- VISUALS
 pEnemy:AddToggle("Glow ESP", false, function(v) State.GlowESP = v end)
 pEnemy:AddToggle("Name ESP", false, function(v) State.NameESP = v end)
 pEnemy:AddToggle("Role ESP", false, function(v) State.RoleESP = v end)
 
--- VISUALS - ESP Colors
-local ESPColorPresets = {
-    Color3.fromRGB(236,72,153),
-    Color3.fromRGB(59,130,246),
-    Color3.fromRGB(34,197,94),
-    Color3.fromRGB(234,179,8),
-    Color3.fromRGB(255,255,255),
-    Color3.fromRGB(168,85,247),
-    Color3.fromRGB(255,100,0),
-    Color3.fromRGB(255,0,0),
-    Color3.fromRGB(0,255,255),
-    Color3.fromRGB(139,0,0),
+local ColorCycle = {
+    Color3.fromRGB(236,72,153), Color3.fromRGB(59,130,246), Color3.fromRGB(34,197,94),
+    Color3.fromRGB(234,179,8), Color3.fromRGB(255,255,255), Color3.fromRGB(168,85,247),
+    Color3.fromRGB(255,100,0), Color3.fromRGB(255,0,0), Color3.fromRGB(0,255,255),
 }
-local function cycleColor(cur)
-    for i, c in ipairs(ESPColorPresets) do
-        if c == cur then
-            return ESPColorPresets[(i % #ESPColorPresets) + 1]
-        end
+local function cyc(c)
+    for i, cc in ipairs(ColorCycle) do
+        if cc == c then return ColorCycle[(i % #ColorCycle) + 1] end
     end
-    return ESPColorPresets[1]
+    return ColorCycle[1]
 end
 
-pEspColors:AddButton("Murderer Color: cycling", function(btn)
-    State.ESP_Murderer_Color = cycleColor(State.ESP_Murderer_Color)
-    local c = State.ESP_Murderer_Color
-    btn.Text = string.format("Murderer: RGB(%d,%d,%d)", math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+pEnemy:AddButton("Murderer Color", function(btn)
+    State.ESP_Murderer_Color = cyc(State.ESP_Murderer_Color)
+    btn.Text = "Murderer Color: RGB(" .. math.floor(State.ESP_Murderer_Color.R*255) .. "," .. math.floor(State.ESP_Murderer_Color.G*255) .. "," .. math.floor(State.ESP_Murderer_Color.B*255) .. ")"
 end)
-pEspColors:AddButton("Sheriff Color: cycling", function(btn)
-    State.ESP_Sheriff_Color = cycleColor(State.ESP_Sheriff_Color)
-    local c = State.ESP_Sheriff_Color
-    btn.Text = string.format("Sheriff: RGB(%d,%d,%d)", math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+pEnemy:AddButton("Sheriff Color", function(btn)
+    State.ESP_Sheriff_Color = cyc(State.ESP_Sheriff_Color)
+    btn.Text = "Sheriff Color: RGB(" .. math.floor(State.ESP_Sheriff_Color.R*255) .. "," .. math.floor(State.ESP_Sheriff_Color.G*255) .. "," .. math.floor(State.ESP_Sheriff_Color.B*255) .. ")"
 end)
-pEspColors:AddButton("Innocent Color: cycling", function(btn)
-    State.ESP_Innocent_Color = cycleColor(State.ESP_Innocent_Color)
-    local c = State.ESP_Innocent_Color
-    btn.Text = string.format("Innocent: RGB(%d,%d,%d)", math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+pEnemy:AddButton("Innocent Color", function(btn)
+    State.ESP_Innocent_Color = cyc(State.ESP_Innocent_Color)
+    btn.Text = "Innocent Color: RGB(" .. math.floor(State.ESP_Innocent_Color.R*255) .. "," .. math.floor(State.ESP_Innocent_Color.G*255) .. "," .. math.floor(State.ESP_Innocent_Color.B*255) .. ")"
 end)
-pEspColors:AddButton("Reset ESP Colors", function()
+pEnemy:AddButton("Reset ESP Colors", function()
     State.ESP_Murderer_Color = Color3.fromRGB(236,72,153)
     State.ESP_Sheriff_Color = Color3.fromRGB(59,130,246)
     State.ESP_Innocent_Color = Color3.fromRGB(34,197,94)
-    SendNotify("ESP Colors", "Reset to defaults")
+    SendNotify("ESP Colors","Reset")
 end)
 
--- VISUALS - Extra
 pExtra:AddToggle("Screen Crosshair", false, function(v) State.Crosshair = v CrosshairV.Visible = v CrosshairH.Visible = v end)
+pExtra:AddToggle("Chase Camera", false, function(v) State.ChaseCamera = v end)
 
--- VISUALS - World
-pWorld:AddToggle("Fullbright", false, function(v) State.Fullbright = v if not v then Lighting.Ambient = Color3.fromRGB(128,128,128) end end)
+pWorld:AddToggle("Fullbright", false, function(v) State.Fullbright = v if not v then Lighting.Ambient = State.AmbientColor end end)
 pWorld:AddToggle("Night Mode", false, function(v)
     State.NightMode = v
     if v then
@@ -2236,32 +2104,29 @@ pWorld:AddToggle("Night Mode", false, function(v)
         Lighting.Ambient = Color3.fromRGB(20,20,35)
         Lighting.OutdoorAmbient = Color3.fromRGB(25,25,45)
         Lighting.Brightness = 0.5
-        Lighting.GlobalShadows = true
     else
-        Lighting.Ambient = Color3.fromRGB(128,128,128)
-        Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
-        Lighting.Brightness = 2
+        Lighting.Ambient = State.AmbientColor
+        Lighting.OutdoorAmbient = State.AmbientColor
+        Lighting.Brightness = State.Brightness
         Lighting.ClockTime = 14
     end
 end)
 pWorld:AddToggle("No Fog", false, function(v) State.NoFog = v if not v then Lighting.FogEnd = 1000 end end)
 pWorld:AddSlider("Time of Day", 0, 24, 14, function(v) Lighting.ClockTime = v end)
-pWorld:AddSlider("Brightness", 0, 5, 2, function(v) Lighting.Brightness = v end)
+pWorld:AddSlider("Brightness", 0, 5, 2, function(v) State.Brightness = v Lighting.Brightness = v end)
 pWorld:AddSlider("Fog End", 0, 5000, 1000, function(v) Lighting.FogEnd = v end)
 pWorld:AddSlider("Fog Start", 0, 5000, 0, function(v) Lighting.FogStart = v end)
-pWorld:AddToggle("Global Shadows", true, function(v) Lighting.GlobalShadows = v end)
-pWorld:AddButton("Ambient Color: cycling", function(btn)
-    State.AmbientColor = cycleColor(State.AmbientColor)
+pWorld:AddButton("Ambient Color", function(btn)
+    State.AmbientColor = cyc(State.AmbientColor)
     Lighting.Ambient = State.AmbientColor
-    local c = State.AmbientColor
-    btn.Text = string.format("Ambient: RGB(%d,%d,%d)", math.floor(c.R*255), math.floor(c.G*255), math.floor(c.B*255))
+    btn.Text = "Ambient: RGB(" .. math.floor(State.AmbientColor.R*255) .. "," .. math.floor(State.AmbientColor.G*255) .. "," .. math.floor(State.AmbientColor.B*255) .. ")"
 end)
+pWorld:AddToggle("Global Shadows", true, function(v) Lighting.GlobalShadows = v end)
 pWorld:AddToggle("Saturation Boost", false, function(v) State.SaturationBoost = v ColorCorr.Saturation = v and State.SaturationVal or 0 end)
 pWorld:AddSlider("Saturation Level", 1, 3, 1.5, function(v) State.SaturationVal = v if State.SaturationBoost then ColorCorr.Saturation = v end end)
 pWorld:AddToggle("Depth of Field", false, function(v) State.DepthOfField = v DOF.Enabled = v end)
 pWorld:AddToggle("Sun Rays", false, function(v) State.SunRays = v SunRaysInst.Enabled = v end)
 
--- MOVEMENT
 pGeneralMovement:AddToggle("Auto Bhop", false, function(v) State.Bhop = v end)
 pGeneralMovement:AddToggle("Auto Strafer", false, function(v) State.AutoStrafe = v end)
 pGeneralMovement:AddSlider("Auto Strafe Speed", 16, 100, 16, function(v) State.StrafeSpeed = v end)
@@ -2298,8 +2163,12 @@ pAntiAim:AddSlider("Yaw Speed", 5, 100, 30, function(v) State.YawSpeed = v end)
 
 pTroll:AddToggle("Round Timer", false, function(v) State.RoundTimer = v end)
 
--- SETTINGS - Configs
-pConfigs:AddText("Save slots by account or device")
+pServer:AddButton("Rejoin Server", function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+pServer:AddButton("Unload TORIUM", function()
+    if getgenv().ToriumLib_Cleanup then getgenv().ToriumLib_Cleanup() end
+end)
+
+-- SETTINGS
 pConfigs:AddButton("Save Slot 1", function() SaveConfig(1) end)
 pConfigs:AddButton("Load Slot 1", function() LoadConfig(1) end)
 pConfigs:AddButton("Save Slot 2", function() SaveConfig(2) end)
@@ -2309,26 +2178,6 @@ pConfigs:AddButton("Load Slot 3", function() LoadConfig(3) end)
 pConfigs:AddButton("Delete Slot 1", function() DeleteConfig(1) end)
 pConfigs:AddButton("Delete Slot 2", function() DeleteConfig(2) end)
 pConfigs:AddButton("Delete Slot 3", function() DeleteConfig(3) end)
-pConfigs:AddText(HaveFileAPI() and "Storage: file-based" or "Storage: memory (no file API)")
-
--- SETTINGS - Server
-pServerSettings:AddButton("Rejoin Server", function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-pServerSettings:AddButton("Server Hop", function()
-    SendNotify("TORIUM", "Searching...")
-    pcall(function()
-        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-        local data = HttpService:JSONDecode(game:HttpGet(url))
-        for _, s in ipairs(data.data) do
-            if s.playing < s.maxPlayers and s.id ~= game.JobId then
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
-                break
-            end
-        end
-    end)
-end)
-pServerSettings:AddButton("Unload TORIUM", function()
-    if getgenv().ToriumLib_Cleanup then getgenv().ToriumLib_Cleanup() end
-end)
 
 -- MAIN RENDER
 local mainConn = RunService.RenderStepped:Connect(function()
@@ -2336,6 +2185,10 @@ local mainConn = RunService.RenderStepped:Connect(function()
         if not workspace.CurrentCamera then return end
         if State.Fullbright and not State.NightMode then Lighting.Ambient = Color3.fromRGB(255,255,255) end
         if State.NoFog then Lighting.FogEnd = 9e9 end
+        if State.ChaseCamera and State.ChaseTarget and State.ChaseTarget.Character then
+            local hu = State.ChaseTarget.Character:FindFirstChildOfClass("Humanoid")
+            if hu then workspace.CurrentCamera.CameraSubject = hu end
+        end
         if State.SilentAim then DoSilentAim() end
         if State.KillAura then StartKillAura() end
         if State.AutoGrabGun then AutoGrabGunTick() end
@@ -2361,4 +2214,4 @@ local mainConn = RunService.RenderStepped:Connect(function()
 end)
 table.insert(activeCleanups, function() pcall(function() mainConn:Disconnect() end) end)
 
-SendNotify("TORIUM v3.8", "Loaded. " .. (IS_MOBILE and "Mobile" or "PC"))
+SendNotify("TORIUM v3.6.2", "Loaded. " .. (IS_MOBILE and "Mobile" or "PC")) 
